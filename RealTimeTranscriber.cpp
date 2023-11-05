@@ -42,29 +42,7 @@ RealTimeTranscriber::RealTimeTranscriber(int sample_rate)
     m_audioDataBuffer.reserve(m_framesPerBuffer * m_channels * sizeof(int16_t));
     m_audioJSONBuffer["audio_data"] = "";
 
-    m_messageHandlers["PartialTranscript"] = [](nlohmann::json& json_msg) {
-        // Handle partial transcript
-        std::string text = json_msg["text"];
-        float confidence = json_msg["confidence"];
-        std::cout << "Partial transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
-        };
-    m_messageHandlers["FinalTranscript"] = [](nlohmann::json& json_msg) {
-        // Handle final transcript
-        std::string text = json_msg["text"];
-        float confidence = json_msg["confidence"];
-        bool punctuated = json_msg["punctuated"];
-        std::cout << "Final transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
-        };
-    m_messageHandlers["SessionBegins"] = [](nlohmann::json& json_msg) {
-        // Handle session start
-        std::string session_id = json_msg["session_id"];
-        std::string expires_at = json_msg["expires_at"];
-        std::cout << "Session started with ID: " << session_id << " and expires at: " << expires_at << std::endl;
-        };
-    m_messageHandlers["SessionTerminated"] = [](nlohmann::json& json_msg) {
-        // Handle session termination
-        std::cout << "Session terminated." << std::endl;
-        };
+    
 }
 
 RealTimeTranscriber::~RealTimeTranscriber() {
@@ -209,14 +187,14 @@ int RealTimeTranscriber::on_audio_data(const void* inputBuffer, unsigned long fr
 
     // Cast data passed through stream to our structure.
     const auto* in = static_cast<const int16_t*>(inputBuffer);
-    m_audioDataBuffer.assign(reinterpret_cast<const char*>(in), framesPerBuffer * m_channels * sizeof(int16_t)); // Copy the audio data into the buffer
+    m_audioDataBuffer.assign(reinterpret_cast<const char*>(in), reinterpret_cast<const char*>(in) + framesPerBuffer * m_channels * sizeof(int16_t)); // Copy the audio data into the buffer
     enqueue_audio_data(m_audioDataBuffer);
 
     return paContinue;
 }
 
 // New methods for queue handling
-void RealTimeTranscriber::enqueue_audio_data(const std::string& audio_data) {
+void RealTimeTranscriber::enqueue_audio_data(const std::vector<char>& audio_data) {
     std::lock_guard<std::mutex> lock(m_audioQueueMutex);
     m_audioQueue.push_back(audio_data);
     m_queueCond.notify_one();
@@ -227,7 +205,7 @@ void RealTimeTranscriber::send_audio_data_thread() {
     websocketpp::lib::error_code ec;
 
     while (!m_stopFlag.load()) {
-        std::string audio_data;
+        std::vector<char> audio_data;
         {
             std::unique_lock<std::mutex> lock(m_audioQueueMutex);
             m_queueCond.wait(lock, [this] { return !m_audioQueue.empty() || m_stopFlag.load(); });
@@ -260,19 +238,35 @@ void RealTimeTranscriber::on_message(connection_hdl hdl, message_ptr msg) {
     // Extract the message type
     std::string message_type = json_msg["message_type"];
 
-    // Handle different message types
-    auto it = m_messageHandlers.find(message_type);
-    if (it != m_messageHandlers.end()) {
-        it->second(json_msg);
-        m_transcriptionTimestamp = std::chrono::high_resolution_clock::now();
-        std::cout << "Time taken for transcription: "
-                  << std::chrono::duration_cast<std::chrono::milliseconds>(m_transcriptionTimestamp - m_inputTimestamp).count()
-                  << " ms"
-                  << std::endl;
+    if (message_type == "PartialTranscript") {
+        std::string text = json_msg["text"];
+        float confidence = json_msg["confidence"];
+        std::cout << "Partial transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
     }
+    else if (message_type == "FinalTranscript") {
+		std::string text = json_msg["text"];
+		float confidence = json_msg["confidence"];
+		bool punctuated = json_msg["punctuated"];
+		std::cout << "Final transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
+	}
+    else if (message_type == "SessionBegins") {
+		std::string session_id = json_msg["session_id"];
+		std::string expires_at = json_msg["expires_at"];
+		std::cout << "Session started with ID: " << session_id << " and expires at: " << expires_at << std::endl;
+	}
+    else if (message_type == "SessionTerminated") {
+		std::cout << "Session terminated." << std::endl;
+	}
     else {
-        std::cout << "Received unknown message type: " << message_type << std::endl;
-    }
+		std::cout << "Received unknown message type: " << message_type << std::endl;
+	}   
+    
+    m_transcriptionTimestamp = std::chrono::high_resolution_clock::now();
+    std::cout << "Time taken for transcription: "
+                << std::chrono::duration_cast<std::chrono::milliseconds>(m_transcriptionTimestamp - m_inputTimestamp).count()
+                << " ms"
+                << std::endl;
+
 }
 
 void RealTimeTranscriber::on_open(connection_hdl hdl) {

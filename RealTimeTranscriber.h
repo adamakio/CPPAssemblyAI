@@ -58,7 +58,7 @@ namespace ChatBot {
 
         // PortAudio functions
         int on_audio_data(const void* inputBuffer, unsigned long framesPerBuffer); ///< Implementation of PortAudio callback function
-        void enqueue_audio_data(const std::string& audio_data); ///< Enqueues audio data to be sent
+        void enqueue_audio_data(const std::vector<char>& audio_data); ///< Enqueues audio data to be sent
         void send_audio_data_thread(); ///< Thread for sending audio data
 
         // WebSocket binding functions
@@ -78,8 +78,7 @@ namespace ChatBot {
         std::string m_terminateMsg{ m_terminateJSON.dump() }; ///< Terminate session message
 
         // Audio buffers for sending data are initialized in constructor to avoid reallocation
-        
-        std::string m_audioDataBuffer; ///< Buffer for audio data
+        std::vector<char> m_audioDataBuffer; ///< Buffer for audio data
         nlohmann::json m_audioJSONBuffer; ///< Buffer for audio JSON payload
 
         // Threads stuff
@@ -87,7 +86,7 @@ namespace ChatBot {
         std::atomic<bool> m_isConnected{ false }; ///< Indicates if the WebSocket connection is open
 
         std::thread m_sendThread; ///< Thread for sending audio data
-        std::deque<std::string> m_audioQueue; ///< Queue for audio data
+        std::deque<std::vector<char>> m_audioQueue; ///< Queue for audio data
         std::condition_variable m_queueCond; ///< Condition variable for queue
         std::atomic<bool> m_stopFlag{ false }; ///< Indicates if the transcription has been stopped
 
@@ -104,9 +103,6 @@ namespace ChatBot {
         const int m_framesPerBuffer; ///< 100ms to 2000ms of audio data per message (0.1 * sampleRate -> 2.0 * sampleRate)
         const PaSampleFormat m_format{ paInt16 }; ///< WAV PCM16
         const int m_channels{ 1 }; ///< Mono (single-channel)
-
-        // Define a map to hold handlers for different types of messages.
-        std::unordered_map<std::string, std::function<void(nlohmann::json&)>> m_messageHandlers;
 
         // Performance trackers
         std::chrono::high_resolution_clock::time_point m_inputTimestamp{std::chrono::high_resolution_clock::now()};
