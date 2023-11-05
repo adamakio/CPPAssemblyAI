@@ -15,8 +15,7 @@ using namespace ChatBot;
 
 
 RealTimeTranscriber::RealTimeTranscriber(int sample_rate)
-    : m_aaiAPItoken("fb401df1f67247c9a8aaf02d4dd785ee")
-    , m_sampleRate(sample_rate)
+    : m_sampleRate(sample_rate)
     , m_framesPerBuffer(static_cast<int>(sample_rate * 0.1))
 {
     // Set up WebSocket++ loggers
@@ -59,7 +58,7 @@ RealTimeTranscriber::~RealTimeTranscriber() {
 
 void RealTimeTranscriber::start_transcription() {
     // Guard against starting transcription if one is already in progress
-    std::lock_guard<std::mutex> lock(m_wsMutex);
+    std::lock_guard<std::mutex> lock(m_startStopMutex);
     if (m_isConnected.load()) {
         std::cerr << "Transcription is already in progress." << std::endl;
         return;
@@ -120,26 +119,27 @@ void RealTimeTranscriber::start_transcription() {
 }
 
 void RealTimeTranscriber::stop_transcription() {
-    // Check if the transcription is already stopped to avoid redundant operations.
-    if (!m_isConnected.load()) {
-        std::cerr << "No transcription is in progress to stop." << std::endl;
-        return;
+    {
+        std::lock_guard<std::mutex> lock(m_startStopMutex);
+        // Check if the transcription is already stopped to avoid redundant operations.
+        if (!m_isConnected.load()) {
+            std::cerr << "No transcription is in progress to stop." << std::endl;
+            return;
+        }
+        m_isConnected.store(false); // This stops the callback loop
+        m_stopFlag.store(true); // This stops the sending thread
     }
 
-    // This stops the callback loop 
-    m_isConnected.store(false);
+    
 
     // Lock the mutex to protect against concurrent access.
     std::lock_guard<std::mutex> lock(m_wsMutex);
 
     // Stop and close the PortAudio stream if it's running.
-    {
-        std::lock_guard<std::mutex> stream_lock(m_audioStreamMutex); // Protect the stream access
-        if (m_audioStream) {
-            m_audioErr = Pa_StopStream(m_audioStream);
-            if (m_audioErr != paNoError) {
-                std::cerr << "PortAudio error when stopping the stream: " << Pa_GetErrorText(m_audioErr) << std::endl;
-            }
+    if (m_audioStream) {
+        m_audioErr = Pa_StopStream(m_audioStream);
+        if (m_audioErr != paNoError) {
+            std::cerr << "PortAudio error when stopping the stream: " << Pa_GetErrorText(m_audioErr) << std::endl;
         }
     }
 
@@ -176,8 +176,6 @@ int RealTimeTranscriber::pa_callback(const void* inputBuffer, void* outputBuffer
 }
 
 int RealTimeTranscriber::on_audio_data(const void* inputBuffer, unsigned long framesPerBuffer) {
-    auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
-
     // Check if the transcription has been stopped and if so, return immediately.
     if (!m_isConnected.load()) {
         return paComplete; // Use paComplete to indicate the stream can be stopped.
@@ -191,15 +189,9 @@ int RealTimeTranscriber::on_audio_data(const void* inputBuffer, unsigned long fr
 
     // Cast data passed through stream to our structure.
     const auto* in = static_cast<const int16_t*>(inputBuffer);
-    {
-        std::lock_guard<std::mutex> buffer_lock(m_audioBufferMutex); // Protect the buffer
-        m_audioDataBuffer.assign(reinterpret_cast<const char*>(in), framesPerBuffer * m_channels * sizeof(int16_t)); // Copy the audio data into the buffer
-        m_audioJSONBuffer["audio_data"] = websocketpp::base64_encode(reinterpret_cast<const unsigned char*>(m_audioDataBuffer.data()), m_audioDataBuffer.size());
-        enqueue_audio_data(m_audioJSONBuffer.dump());
-    }
-
-    auto end_time = std::chrono::high_resolution_clock::now(); // End timing
-    std::cout << "Audio data sent in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
+    m_audioDataBuffer.assign(reinterpret_cast<const char*>(in), framesPerBuffer * m_channels * sizeof(int16_t)); // Copy the audio data into the buffer
+    m_audioJSONBuffer["audio_data"] = websocketpp::base64_encode(reinterpret_cast<const unsigned char*>(m_audioDataBuffer.data()), m_audioDataBuffer.size());
+    enqueue_audio_data(m_audioJSONBuffer.dump());
 
     return paContinue;
 }
@@ -207,21 +199,10 @@ int RealTimeTranscriber::on_audio_data(const void* inputBuffer, unsigned long fr
 // New methods for queue handling
 void RealTimeTranscriber::enqueue_audio_data(const std::string& audio_data) {
     {
-        std::lock_guard<std::mutex> lock(m_wsMutex);
+        std::lock_guard<std::mutex> lock(m_audioQueueMutex);
         m_audioQueue.push(audio_data);
     }
-    m_queueCond.notify_one();
-}
-
-std::string RealTimeTranscriber::dequeue_audio_data() {
-    std::unique_lock<std::mutex> lock(m_wsMutex);
-    m_queueCond.wait(lock, [this] { return !m_audioQueue.empty() || m_stopFlag.load(); });
-    if (m_stopFlag.load()) {
-        return "";
-    }
-    std::string data = m_audioQueue.front();
-    m_audioQueue.pop();
-    return data;
+    m_queueCond.notify_all();
 }
 
 // New thread function for sending data
@@ -229,9 +210,15 @@ void RealTimeTranscriber::send_audio_data_thread() {
     websocketpp::lib::error_code ec;
 
     while (!m_stopFlag.load()) {
-        std::string audio_data = dequeue_audio_data();
-        if (audio_data.empty() && m_stopFlag.load()) {
-            break;
+        std::string audio_data;
+        {
+            std::unique_lock<std::mutex> lock(m_audioQueueMutex);
+            m_queueCond.wait(lock, [this] { return !m_audioQueue.empty() || m_stopFlag.load(); });
+            if (m_stopFlag.load()) {
+                break;
+            }
+            audio_data = m_audioQueue.front();
+            m_audioQueue.pop();
         }
         // Send the audio data using WebSocket
         m_wsClient.send(m_wsHandle, audio_data, websocketpp::frame::opcode::text, ec);
@@ -249,7 +236,6 @@ void RealTimeTranscriber::send_audio_data_thread() {
 
 // Define a callback to handle incoming messages
 void RealTimeTranscriber::on_message(connection_hdl hdl, message_ptr msg) {
-    auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
     // Parse the JSON message
     nlohmann::json json_msg = nlohmann::json::parse(msg->get_payload());
 
@@ -284,8 +270,6 @@ void RealTimeTranscriber::on_message(connection_hdl hdl, message_ptr msg) {
         // Handle unknown message type
         std::cout << "Received unknown message type: " << message_type << std::endl;
     }
-    auto end_time = std::chrono::high_resolution_clock::now(); // End timing
-    std::cout << "Message handled in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
 }
 
 void RealTimeTranscriber::on_open(connection_hdl hdl) {
