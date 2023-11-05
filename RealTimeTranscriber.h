@@ -87,7 +87,7 @@ namespace ChatBot {
         std::atomic<bool> m_isConnected{ false }; ///< Indicates if the WebSocket connection is open
 
         std::thread m_sendThread; ///< Thread for sending audio data
-        std::queue<std::string> m_audioQueue; ///< Queue for audio data
+        std::list<std::string> m_audioQueue; ///< Queue for audio data
         std::condition_variable m_queueCond; ///< Condition variable for queue
         std::atomic<bool> m_stopFlag{ false }; ///< Indicates if the transcription has been stopped
 

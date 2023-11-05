@@ -193,8 +193,8 @@ int RealTimeTranscriber::on_audio_data(const void* inputBuffer, unsigned long fr
 // New methods for queue handling
 void RealTimeTranscriber::enqueue_audio_data(const std::string& audio_data) {
     std::lock_guard<std::mutex> lock(m_audioQueueMutex);
-    m_audioQueue.push(audio_data);
-    m_queueCond.notify_all();
+    m_audioQueue.push_back(audio_data);
+    m_queueCond.notify_one();
 }
 
 // New thread function for sending data
@@ -210,7 +210,7 @@ void RealTimeTranscriber::send_audio_data_thread() {
                 break;
             }
             audio_data = m_audioQueue.front();
-            m_audioQueue.pop();
+            m_audioQueue.pop_front();
         }
         // Send the audio data using WebSocket
         m_audioJSONBuffer["audio_data"] = websocketpp::base64_encode(reinterpret_cast<const unsigned char*>(audio_data.data()), audio_data.size());
