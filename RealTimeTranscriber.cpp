@@ -41,6 +41,30 @@ RealTimeTranscriber::RealTimeTranscriber(int sample_rate)
     // Preallocate 
     m_audioDataBuffer.reserve(m_framesPerBuffer * m_channels * sizeof(int16_t));
     m_audioJSONBuffer["audio_data"] = "";
+
+    m_messageHandlers["PartialTranscript"] = [](nlohmann::json& json_msg) {
+        // Handle partial transcript
+        std::string text = json_msg["text"];
+        float confidence = json_msg["confidence"];
+        std::cout << "Partial transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
+        };
+    m_messageHandlers["FinalTranscript"] = [](nlohmann::json& json_msg) {
+        // Handle final transcript
+        std::string text = json_msg["text"];
+        float confidence = json_msg["confidence"];
+        bool punctuated = json_msg["punctuated"];
+        std::cout << "Final transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
+        };
+    m_messageHandlers["SessionBegins"] = [](nlohmann::json& json_msg) {
+        // Handle session start
+        std::string session_id = json_msg["session_id"];
+        std::string expires_at = json_msg["expires_at"];
+        std::cout << "Session started with ID: " << session_id << " and expires at: " << expires_at << std::endl;
+        };
+    m_messageHandlers["SessionTerminated"] = [](nlohmann::json& json_msg) {
+        // Handle session termination
+        std::cout << "Session terminated." << std::endl;
+        };
 }
 
 RealTimeTranscriber::~RealTimeTranscriber() {
@@ -236,31 +260,11 @@ void RealTimeTranscriber::on_message(connection_hdl hdl, message_ptr msg) {
     std::string message_type = json_msg["message_type"];
 
     // Handle different message types
-    if (message_type == "PartialTranscript") {
-        // Handle partial transcript
-        std::string text = json_msg["text"];
-        float confidence = json_msg["confidence"];
-        std::cout << "Partial transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
-    }
-    else if (message_type == "FinalTranscript") {
-        // Handle final transcript
-        std::string text = json_msg["text"];
-        float confidence = json_msg["confidence"];
-        bool punctuated = json_msg["punctuated"];
-        std::cout << "Final transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
-    }
-    else if (message_type == "SessionBegins") {
-        // Handle session start
-        std::string session_id = json_msg["session_id"];
-        std::string expires_at = json_msg["expires_at"];
-        std::cout << "Session started with ID: " << session_id << " and expires at: " << expires_at << std::endl;
-    }
-    else if (message_type == "SessionTerminated") {
-        // Handle session termination
-        std::cout << "Session terminated." << std::endl;
+    auto it = m_messageHandlers.find(message_type);
+    if (it != m_messageHandlers.end()) {
+        it->second(json_msg);
     }
     else {
-        // Handle unknown message type
         std::cout << "Received unknown message type: " << message_type << std::endl;
     }
 }

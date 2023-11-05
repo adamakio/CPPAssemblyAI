@@ -104,6 +104,11 @@ namespace ChatBot {
         const int m_framesPerBuffer; ///< 100ms to 2000ms of audio data per message (0.1 * sampleRate -> 2.0 * sampleRate)
         const PaSampleFormat m_format{ paInt16 }; ///< WAV PCM16
         const int m_channels{ 1 }; ///< Mono (single-channel)
+
+        // Message handlers
+        // Define a map to hold handlers for different types of messages.
+        std::unordered_map<std::string, std::function<void(nlohmann::json&)>> m_messageHandlers;
+        
     };
 } // namespace ChatBot
 #endif // !REALTIMETRANSCRIBER_H
