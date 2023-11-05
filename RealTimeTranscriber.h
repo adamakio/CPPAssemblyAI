@@ -92,7 +92,6 @@ namespace ChatBot {
         std::atomic<bool> m_stopFlag{ false }; ///< Indicates if the transcription has been stopped
 
         std::mutex m_startStopMutex; ///< Mutex for protecting start/stop functions
-        std::mutex m_wsMutex; ///< Mutex for protecting WebSocket connection
         std::mutex m_audioQueueMutex; ///< Mutex for protecting audio buffers
 
         // PortAudio stream

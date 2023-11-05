@@ -130,11 +130,6 @@ void RealTimeTranscriber::stop_transcription() {
         m_stopFlag.store(true); // This stops the sending thread
     }
 
-    
-
-    // Lock the mutex to protect against concurrent access.
-    std::lock_guard<std::mutex> lock(m_wsMutex);
-
     // Stop and close the PortAudio stream if it's running.
     if (m_audioStream) {
         m_audioErr = Pa_StopStream(m_audioStream);
