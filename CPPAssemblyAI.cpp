@@ -1,304 +1,412 @@
-/*// CPPAssemblyAI.cpp : This file contains the 'main' function. Program execution begins and ends there.
-//
+/**
+* @file CPPAssemblyAI.h
+* @author zah
+* @brief Implementation of Assembly AI Realtime API in pure C++
+* @version 0.1
+* @date 2023-10-20
+*
+* @copyright Copyright (c) 2023
+*
+*/
 
+#include "portaudio.h"
+#include <nlohmann/json.hpp>
+#include <websocketpp/base64/base64.hpp>
 #include <websocketpp/config/asio_client.hpp>
 #include <websocketpp/client.hpp>
 
-#include <websocketpp/common/thread.hpp>
-#include <websocketpp/common/memory.hpp>
-
-#include <cstdlib>
+#include <cstdint>
 #include <iostream>
-#include <map>
 #include <string>
-#include <sstream>
+#include <vector>
+
+#include <thread>
+#include <atomic>
+#include <mutex>
+
 
 typedef websocketpp::client<websocketpp::config::asio_tls_client> client;
+typedef client::message_ptr message_ptr;
+typedef websocketpp::connection_hdl connection_hdl;
+typedef websocketpp::lib::shared_ptr<boost::asio::ssl::context> context_ptr;
 
-class connection_metadata {
-public:
-    typedef websocketpp::lib::shared_ptr<connection_metadata> ptr;
+using websocketpp::lib::placeholders::_1;
+using websocketpp::lib::placeholders::_2;
 
-    connection_metadata(int id, websocketpp::connection_hdl hdl, std::string uri)
-        : m_id(id)
-        , m_hdl(hdl)
-        , m_status("Connecting")
-        , m_uri(uri)
-        , m_server("N/A")
-    {}
-
-    void on_open(client* c, websocketpp::connection_hdl hdl) {
-        m_status = "Open";
-
-        client::connection_ptr con = c->get_con_from_hdl(hdl);
-        m_server = con->get_response_header("Server");
-    }
-
-    void on_fail(client* c, websocketpp::connection_hdl hdl) {
-        m_status = "Failed";
-
-        client::connection_ptr con = c->get_con_from_hdl(hdl);
-        m_server = con->get_response_header("Server");
-        m_error_reason = con->get_ec().message();
-    }
-
-    void on_close(client* c, websocketpp::connection_hdl hdl) {
-        m_status = "Closed";
-        client::connection_ptr con = c->get_con_from_hdl(hdl);
-        std::stringstream s;
-        s << "close code: " << con->get_remote_close_code() << " ("
-            << websocketpp::close::status::get_string(con->get_remote_close_code())
-            << "), close reason: " << con->get_remote_close_reason();
-        m_error_reason = s.str();
-    }
-
-    void on_message(websocketpp::connection_hdl hdl, client::message_ptr msg) {
-        if (msg->get_opcode() == websocketpp::frame::opcode::text) {
-            m_messages.push_back(msg->get_payload());
-        }
-        else {
-            m_messages.push_back(websocketpp::utility::to_hex(msg->get_payload()));
-        }
-    }
-
-    void record_sent_message(std::string message) {
-        m_messages.push_back(">> " + message);
-    }
-
-    int get_id() const {
-        return m_id;
-    }
-
-    websocketpp::connection_hdl get_hdl() const {
-        return m_hdl;
-    }
-
-    std::string get_status() const {
-        return m_status;
-    }
-
-    friend std::ostream& operator<< (std::ostream& out, connection_metadata const& data);
+class TranscriptionClient {
 private:
-    int m_id;
-    websocketpp::connection_hdl m_hdl;
-    std::string m_status;
-    std::string m_uri;
-    std::string m_server;
-    std::string m_error_reason;
-    std::vector<std::string> m_messages;
-};
+    // WebSocket client and connection handle
+    client m_wsClient; ///< WebSocket client
+    client::connection_ptr m_con = nullptr; ///< WebSocket connection pointer
+    connection_hdl m_wsHandle; ///< WebSocket connection handle
+    websocketpp::lib::error_code m_wsError; ///< WebSocket error code
 
-std::ostream& operator<< (std::ostream& out, connection_metadata const& data) {
-    out << "> URI: " << data.m_uri << "\n"
-        << "> Status: " << data.m_status << "\n"
-        << "> Remote Server: " << (data.m_server.empty() ? "None Specified" : data.m_server) << "\n"
-        << "> Error/close reason: " << (data.m_error_reason.empty() ? "N/A" : data.m_error_reason) << "\n"
-        << "> Messages Processed: (" << data.m_messages.size() << ") \n";
+    // Termination message created in constructor
+    nlohmann::json m_terminateJSON{ {"terminate_session", true} }; ///< JSON payload for terminating session
+    std::string m_terminateMsg{ m_terminateJSON.dump() }; ///< Terminate session message
 
-    std::vector<std::string>::const_iterator it;
-    for (it = data.m_messages.begin(); it != data.m_messages.end(); ++it) {
-        out << *it << "\n";
-    }
+    // Audio buffers for sending data are initialized in constructor to avoid reallocation
+    std::mutex m_audioBufferMutex; ///< Mutex for protecting audio buffers
+    std::string m_audioDataBuffer; ///< Buffer for audio data
+    nlohmann::json m_audioJSONBuffer; ///< Buffer for audio JSON payload
 
-    return out;
-}
+    // Thread and mutex for synchronization
+    std::thread m_wsThread; ///< Thread for running the WebSocket client's ASIO io_service
+    std::mutex m_wsMutex; ///< Mutex to protect against concurrent access to WebSocket connection
+    std::atomic<bool> m_isConnected{ false }; ///< Indicates if the WebSocket connection is open
 
-class websocket_endpoint {
+    // Queue and condition variable for synchronization
+    std::thread m_sendThread; ///< Thread for sending audio data
+    std::queue<std::string> m_audioQueue; ///< Queue for audio data
+    std::condition_variable m_queueCond; ///< Condition variable for queue
+    std::atomic<bool> m_stopFlag{ false }; ///< Indicates if the transcription has been stopped
+
+    // PortAudio stream
+    std::mutex m_audioStreamMutex; ///< Mutex for protecting the audio stream
+    PaStream* m_audioStream{ nullptr }; ///< PortAudio stream pointer
+    PaError m_audioErr{ paNoError }; ///< PortAudio error code
+
+    // Configuration parameters
+    const std::string m_aaiAPItoken; ///< We'll want this to be configurable
+    const int m_sampleRate; ///< 16kHz is adequate for speech recognition
+    const int m_framesPerBuffer; ///< 100ms to 2000ms of audio data per message (0.1 * sampleRate -> 2.0 * sampleRate)
+    const PaSampleFormat m_format{ paInt16 }; ///< WAV PCM16
+    const int m_channels{ 1 }; ///< Mono (single-channel)
+
 public:
-    websocket_endpoint() : m_next_id(0) {
-        m_endpoint.clear_access_channels(websocketpp::log::alevel::all);
-        m_endpoint.clear_error_channels(websocketpp::log::elevel::all);
+    TranscriptionClient(int sample_rate)
+        : m_aaiAPItoken("fb401df1f67247c9a8aaf02d4dd785ee")
+        , m_sampleRate(sample_rate)
+        , m_framesPerBuffer(static_cast<int>(sample_rate * 0.1))
+    {
+        // Set up WebSocket++ loggers
+        m_wsClient.clear_access_channels(websocketpp::log::alevel::all);
+        m_wsClient.set_access_channels(websocketpp::log::alevel::fail);
 
-        m_endpoint.init_asio();
-        m_endpoint.start_perpetual();
+        // Initialize the Asio transport policy
+        m_wsClient.init_asio();
 
-        m_thread.reset(new websocketpp::lib::thread(&client::run, &m_endpoint));
+        // Register our message handler
+        m_wsClient.set_message_handler(bind(&TranscriptionClient::on_message, this, ::_1, ::_2));
+        m_wsClient.set_open_handler(bind(&TranscriptionClient::on_open, this, ::_1));
+        m_wsClient.set_close_handler(bind(&TranscriptionClient::on_close, this, ::_1));
+        m_wsClient.set_tls_init_handler(bind(&TranscriptionClient::on_tls_init, this, ::_1));
+
+        // Initialize PortAudio
+        m_audioErr = Pa_Initialize();
+        if (m_audioErr != paNoError) {
+            std::cerr << "PortAudio error: " << Pa_GetErrorText(m_audioErr) << std::endl;
+            return;
+        }
+
+        // Preallocate 
+        m_audioDataBuffer.reserve(m_framesPerBuffer * m_channels * sizeof(int16_t));
+        m_audioJSONBuffer["audio_data"] = "";
     }
 
-    ~websocket_endpoint() {
-        m_endpoint.stop_perpetual();
+    ~TranscriptionClient() {
+        if (m_isConnected.load()) {
+            stop_transcription(); // Stop the transcription if it's running
+        }
 
-        for (con_list::const_iterator it = m_connection_list.begin(); it != m_connection_list.end(); ++it) {
-            if (it->second->get_status() != "Open") {
-                // Only close open connections
-                continue;
+        // Terminate PortAudio
+        if (m_audioStream) { // Check if the stream was created
+            Pa_CloseStream(m_audioStream); // Close the stream if it was left open
+            m_audioStream = nullptr; // Reset the pointer to indicate it's closed
+        }
+        Pa_Terminate(); // Terminate PortAudio
+    }
+
+    void start_transcription() {
+        // Guard against starting transcription if one is already in progress
+        std::lock_guard<std::mutex> lock(m_wsMutex); // Use a mutex to protect start/stop operations
+        if (m_isConnected.load()) {
+            std::cerr << "Transcription is already in progress." << std::endl;
+            return;
+        }
+
+        // Establish a new WebSocket connection
+        std::string uri = "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=" + std::to_string(m_sampleRate);
+        m_con = m_wsClient.get_connection(uri, m_wsError);
+        if (m_wsError) {
+            std::cerr << "Could not create connection because: " << m_wsError.message() << std::endl;
+            return;
+        }
+
+        m_con->append_header("Authorization", m_aaiAPItoken);
+        m_wsHandle = m_con->get_handle();
+        m_wsClient.connect(m_con);
+
+        m_isConnected.store(true); // This allows the callback loop to start
+
+        // Open an audio I/O stream.
+        m_audioErr = Pa_OpenDefaultStream(
+            &m_audioStream,							    // Stream pointer
+            m_channels,                                 // Input m_channels
+            0,                                          // Output channels
+            m_format,                                   // Sample format
+            m_sampleRate,		                        // Sample rate
+            m_framesPerBuffer,                          // Frames per buffer
+            &TranscriptionClient::pa_callback,          // Callback function
+            this										// Callback data (this class)
+        );
+
+        if (m_audioErr != paNoError) {
+            std::cerr << "PortAudio error: " << Pa_GetErrorText(m_audioErr) << std::endl;
+            m_wsClient.stop();
+            return;
+        }
+
+        // Start the audio stream
+        m_audioErr = Pa_StartStream(m_audioStream);
+        if (m_audioErr != paNoError) {
+            std::cerr << "PortAudio error: " << Pa_GetErrorText(m_audioErr) << std::endl;
+            m_wsClient.stop();
+            return;
+        }
+
+        // Start the ASIO io_service run loop in a new thread if not already running
+        if (m_wsThread.joinable()) {
+            m_wsThread.join(); // Make sure the previous thread has finished
+        }
+        m_wsThread = std::thread([this] { m_wsClient.run(); });
+
+        // Start the thread for sending audio data
+        if (m_sendThread.joinable()) {
+            m_sendThread.join(); // Ensure the previous sending thread has finished
+        }
+        m_sendThread = std::thread(&TranscriptionClient::send_audio_data_thread, this);
+
+    }
+
+    void stop_transcription() {
+        // Check if the transcription is already stopped to avoid redundant operations.
+        if (!m_isConnected.load()) {
+            std::cerr << "No transcription is in progress to stop." << std::endl;
+            return;
+        }
+
+        // This stops the callback loop 
+        m_isConnected.store(false);
+
+        // Lock the mutex to protect against concurrent access.
+        std::lock_guard<std::mutex> lock(m_wsMutex);
+
+        // Stop and close the PortAudio stream if it's running.
+        {
+            std::lock_guard<std::mutex> stream_lock(m_audioStreamMutex); // Protect the stream access
+            if (m_audioStream) {
+                m_audioErr = Pa_StopStream(m_audioStream);
+                if (m_audioErr != paNoError) {
+                    std::cerr << "PortAudio error when stopping the stream: " << Pa_GetErrorText(m_audioErr) << std::endl;
+                }
             }
+        }
 
-            std::cout << "> Closing connection " << it->second->get_id() << std::endl;
+        // Set the stop flag and notify all to unblock any waiting threads
+        m_stopFlag.store(true);
+        m_queueCond.notify_all();
+        if (m_sendThread.joinable()) {
+            m_sendThread.join(); // Ensure the sending thread is finished before destruction
+        }
 
-            websocketpp::lib::error_code ec;
-            m_endpoint.close(it->second->get_hdl(), websocketpp::close::status::going_away, "", ec);
+        // Close the WebSocket connection if it's open.
+        if (m_wsClient.get_con_from_hdl(m_wsHandle)->get_state() == websocketpp::session::state::open) {
+            m_wsClient.close(m_wsHandle, websocketpp::close::status::going_away, "Closing connection");
+        }
+
+        // Stop the WebSocket client's ASIO io_service to allow the thread to finish
+        m_wsClient.stop();
+        if (m_wsThread.joinable()) {
+            m_wsThread.join();
+        }
+
+        // Reset the connection handle and state
+        m_con.reset();
+        m_wsHandle.reset();
+    }
+
+
+private:
+    static int pa_callback(const void* inputBuffer, void* outputBuffer,
+        unsigned long framesPerBuffer,
+        const PaStreamCallbackTimeInfo* timeInfo,
+        PaStreamCallbackFlags statusFlags,
+        void* userData) {
+        auto* client = static_cast<TranscriptionClient*>(userData);
+        return client->on_audio_data(inputBuffer, framesPerBuffer);
+    }
+
+    int on_audio_data(const void* inputBuffer, unsigned long framesPerBuffer) {
+        auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+
+        // Check if the transcription has been stopped and if so, return immediately.
+        if (!m_isConnected.load()) {
+            return paComplete; // Use paComplete to indicate the stream can be stopped.
+        }
+
+        // Before sending, check if the WebSocket connection is open and valid.
+        if (m_wsClient.get_con_from_hdl(m_wsHandle)->get_state() != websocketpp::session::state::open) {
+            std::cerr << "WebSocket connection is not open." << std::endl;
+            return paComplete; // Use paComplete if the connection isn't open to indicate the stream should be stopped.
+        }
+
+        // Cast data passed through stream to our structure.
+        const auto* in = static_cast<const int16_t*>(inputBuffer);
+        {
+            std::lock_guard<std::mutex> buffer_lock(m_audioBufferMutex); // Protect the buffer
+            m_audioDataBuffer.assign(reinterpret_cast<const char*>(in), framesPerBuffer * m_channels * sizeof(int16_t)); // Copy the audio data into the buffer
+            m_audioJSONBuffer["audio_data"] = websocketpp::base64_encode(reinterpret_cast<const unsigned char*>(m_audioDataBuffer.data()), m_audioDataBuffer.size());
+            enqueue_audio_data(m_audioJSONBuffer.dump());
+        }
+
+        auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+        std::cout << "Audio data sent in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
+
+        return paContinue;
+    }
+
+    // New methods for queue handling
+    void enqueue_audio_data(const std::string& audio_data) {
+        {
+            std::lock_guard<std::mutex> lock(m_wsMutex);
+            m_audioQueue.push(audio_data);
+        }
+        m_queueCond.notify_one();
+    }
+
+    std::string dequeue_audio_data() {
+        std::unique_lock<std::mutex> lock(m_wsMutex);
+        m_queueCond.wait(lock, [this] { return !m_audioQueue.empty() || m_stopFlag.load(); });
+        if (m_stopFlag.load()) {
+            return "";
+        }
+        std::string data = m_audioQueue.front();
+        m_audioQueue.pop();
+        return data;
+    }
+
+    // New thread function for sending data
+    void send_audio_data_thread() {
+        websocketpp::lib::error_code ec;
+
+        while (!m_stopFlag.load()) {
+            std::string audio_data = dequeue_audio_data();
+            if (audio_data.empty() && m_stopFlag.load()) {
+                break;
+            }
+            // Send the audio data using WebSocket
+            m_wsClient.send(m_wsHandle, audio_data, websocketpp::frame::opcode::text, ec);
             if (ec) {
-                std::cout << "> Error closing connection " << it->second->get_id() << ": "
-                    << ec.message() << std::endl;
+                std::cout << "Audio Data Send failed: " << ec.message() << std::endl;
             }
         }
-
-        m_thread->join();
-    }
-
-    int connect(std::string const& uri) {
-        websocketpp::lib::error_code ec;
-
-        client::connection_ptr con = m_endpoint.get_connection(uri, ec);
-
+        // Once stop_flag is set, send the terminate message
+        m_wsClient.send(m_wsHandle, m_terminateMsg, websocketpp::frame::opcode::text, ec);
         if (ec) {
-            std::cout << "> Connect initialization error: " << ec.message() << std::endl;
-            return -1;
+            std::cerr << "Terminate Session Send failed: " << ec.message() << std::endl;
         }
 
-        int new_id = m_next_id++;
-        connection_metadata::ptr metadata_ptr(new connection_metadata(new_id, con->get_handle(), uri));
-        m_connection_list[new_id] = metadata_ptr;
-
-        con->set_open_handler(websocketpp::lib::bind(
-            &connection_metadata::on_open,
-            metadata_ptr,
-            &m_endpoint,
-            websocketpp::lib::placeholders::_1
-        ));
-        con->set_fail_handler(websocketpp::lib::bind(
-            &connection_metadata::on_fail,
-            metadata_ptr,
-            &m_endpoint,
-            websocketpp::lib::placeholders::_1
-        ));
-        con->set_message_handler(websocketpp::lib::bind(
-            &connection_metadata::on_message,
-            metadata_ptr,
-            websocketpp::lib::placeholders::_1,
-            websocketpp::lib::placeholders::_2
-        ));
-        con->replace_header("Authorization", "fb401df1f67247c9a8aaf02d4dd785ee");
-
-
-        m_endpoint.connect(con);
-
-        return new_id;
     }
 
-    void close(int id, websocketpp::close::status::value code) {
-        websocketpp::lib::error_code ec;
+    // Define a callback to handle incoming messages
+    void on_message(connection_hdl hdl, message_ptr msg) {
+        auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+        // Parse the JSON message
+        nlohmann::json json_msg = nlohmann::json::parse(msg->get_payload());
 
-        con_list::iterator metadata_it = m_connection_list.find(id);
-        if (metadata_it == m_connection_list.end()) {
-            std::cout << "> No connection found with id " << id << std::endl;
-            return;
+        // Extract the message type
+        std::string message_type = json_msg["message_type"];
+
+        // Handle different message types
+        if (message_type == "PartialTranscript") {
+            // Handle partial transcript
+            std::string text = json_msg["text"];
+            float confidence = json_msg["confidence"];
+            std::cout << "Partial transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
         }
-
-        m_endpoint.close(metadata_it->second->get_hdl(), code, "", ec);
-        if (ec) {
-            std::cout << "> Error initiating close: " << ec.message() << std::endl;
+        else if (message_type == "FinalTranscript") {
+            // Handle final transcript
+            std::string text = json_msg["text"];
+            float confidence = json_msg["confidence"];
+            bool punctuated = json_msg["punctuated"];
+            std::cout << "Final transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
         }
-    }
-
-    void send(int id, std::string message) {
-        websocketpp::lib::error_code ec;
-
-        con_list::iterator metadata_it = m_connection_list.find(id);
-        if (metadata_it == m_connection_list.end()) {
-            std::cout << "> No connection found with id " << id << std::endl;
-            return;
+        else if (message_type == "SessionBegins") {
+            // Handle session start
+            std::string session_id = json_msg["session_id"];
+            std::string expires_at = json_msg["expires_at"];
+            std::cout << "Session started with ID: " << session_id << " and expires at: " << expires_at << std::endl;
         }
-
-        m_endpoint.send(metadata_it->second->get_hdl(), message, websocketpp::frame::opcode::text, ec);
-        if (ec) {
-            std::cout << "> Error sending message: " << ec.message() << std::endl;
-            return;
-        }
-
-        metadata_it->second->record_sent_message(message);
-    }
-
-    connection_metadata::ptr get_metadata(int id) const {
-        con_list::const_iterator metadata_it = m_connection_list.find(id);
-        if (metadata_it == m_connection_list.end()) {
-            return connection_metadata::ptr();
+        else if (message_type == "SessionTerminated") {
+            // Handle session termination
+            std::cout << "Session terminated." << std::endl;
         }
         else {
-            return metadata_it->second;
+            // Handle unknown message type
+            std::cout << "Received unknown message type: " << message_type << std::endl;
         }
+        auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+        std::cout << "Message handled in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
     }
-private:
-    typedef std::map<int, connection_metadata::ptr> con_list;
 
-    client m_endpoint;
-    websocketpp::lib::shared_ptr<websocketpp::lib::thread> m_thread;
+    void on_open(connection_hdl hdl) {
+        std::cout << "Connection opened" << std::endl;
+        m_isConnected.store(true);
+    }
 
-    con_list m_connection_list;
-    int m_next_id;
+    void on_close(connection_hdl hdl) {
+        std::cout << "Connection closed" << std::endl;
+        m_isConnected.store(false);
+    }
+
+    context_ptr on_tls_init(connection_hdl hdl) {
+        context_ptr ctx = websocketpp::lib::make_shared<boost::asio::ssl::context>(boost::asio::ssl::context::tlsv12);
+        try {
+            ctx->set_options(
+                boost::asio::ssl::context::default_workarounds |
+                boost::asio::ssl::context::no_sslv2 |
+                boost::asio::ssl::context::no_sslv3 |
+                boost::asio::ssl::context::single_dh_use
+            );
+        }
+        catch (std::exception& e) {
+            std::cout << "Error in context pointer: " << e.what() << std::endl;
+        }
+        return ctx;
+    }
 };
 
 int main() {
-    bool done = false;
-    std::string input;
-    websocket_endpoint endpoint;
+    const int SAMPLE_RATE = 16000;
+    std::unique_ptr<TranscriptionClient> client; // Use smart pointer to manage resource
+    char control = ' ';
 
-    while (!done) {
-        std::cout << "Enter Command: ";
-        std::getline(std::cin, input);
+    while (true) {
+        std::cout << "Press 's' to start transcription or 'q' to quit: ";
+        std::cin >> control;
 
-        if (input == "quit") {
-            done = true;
-        }
-        else if (input == "help") {
-            std::cout
-                << "\nCommand List:\n"
-                << "connect <ws uri>\n"
-                << "show <connection id>\n"
-                << "close <connection id>\n"
-                << "send "
-                << "help: Display this help text\n"
-                << "quit: Exit the program\n"
-                << std::endl;
-        }
-        else if (input.substr(0, 7) == "connect") {
-            int id = endpoint.connect(input.substr(8));
-            if (id != -1) {
-                std::cout << "> Created connection with id " << id << std::endl;
+        if (control == 's') {
+            auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+            client = std::make_unique<TranscriptionClient>(SAMPLE_RATE);
+            client->start_transcription();
+            auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+            std::cout << "Transcription started in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
+
+            std::cout << "Transcription started. Press 'e' to end transcription: ";
+            std::cin >> control;
+            if (control == 'e') {
+                auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+                client->stop_transcription();
+                auto end_time = std::chrono::high_resolution_clock::now(); // End timing
+                std::cout << "Transcription stopped in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
+                std::cout << "Transcription stopped." << std::endl;
             }
         }
-        else if (input.substr(0, 4) == "show") {
-            int id = atoi(input.substr(5).c_str());
-
-            connection_metadata::ptr metadata = endpoint.get_metadata(id);
-            if (metadata) {
-                std::cout << *metadata << std::endl;
-            }
-            else {
-                std::cout << "> Unknown connection id " << id << std::endl;
-            }
-        }
-        else if (input.substr(0, 5) == "close") {
-            std::stringstream ss(input);
-
-            std::string cmd;
-            int id;
-            int close_code = websocketpp::close::status::normal;
-            std::string reason;
-
-            ss >> cmd >> id >> close_code;
-            std::getline(ss, reason);
-
-            endpoint.close(id, close_code);
-        }
-        else if (input.substr(0, 4) == "send") {
-            std::stringstream ss(input);
-
-            std::string cmd;
-            int id;
-            std::string message = "";
-
-            ss >> cmd >> id;
-            std::getline(ss, message);
-
-            endpoint.send(id, message);
-        }
-        else {
-            std::cout << "> Unrecognized Command" << std::endl;
+        else if (control == 'q') {
+            std::cout << "Exiting..." << std::endl;
+            break;
         }
     }
-
     return 0;
 }
-*/
