@@ -1,0 +1,20 @@
+# Ignore vs code settings
+.vs/
+
+# Ignore dependencies
+boost_1_82_0/
+json/
+openssl_x64-windows/
+websocketpp/
+
+# Ignore build
+x64/
+
+# Ignore DLLs
+*.dll
+
+# Ignore project files
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
