@@ -39,7 +39,7 @@ RealTimeTranscriber::RealTimeTranscriber(int sample_rate)
     }
 
     // Preallocate 
-    m_audioDataBuffer.reserve(m_framesPerBuffer * m_channels * sizeof(int16_t));
+    m_audioDataBuffer.resize(m_framesPerBuffer * m_channels * sizeof(int16_t));
     m_audioJSONBuffer["audio_data"] = "";
 
     
@@ -240,14 +240,11 @@ void RealTimeTranscriber::on_message(connection_hdl hdl, message_ptr msg) {
 
     if (message_type == "PartialTranscript") {
         std::string text = json_msg["text"];
-        float confidence = json_msg["confidence"];
-        std::cout << "Partial transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
+        std::cout << text << "\r";
     }
     else if (message_type == "FinalTranscript") {
 		std::string text = json_msg["text"];
-		float confidence = json_msg["confidence"];
-		bool punctuated = json_msg["punctuated"];
-		std::cout << "Final transcript: " << text << " (Confidence: " << confidence << ")" << std::endl;
+        std::cout << text << "\r\n";
 	}
     else if (message_type == "SessionBegins") {
 		std::string session_id = json_msg["session_id"];
