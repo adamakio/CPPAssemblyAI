@@ -18,7 +18,7 @@ int main() {
     std::unique_ptr<RealTimeTranscriber> transcriber; // Use smart pointer to manage resource
 
     while (true) {
-        std::cout << "Press enter to start transcription";
+        std::cout << "Press enter to start transcription\n";
         std::cin.get();
         
         {
@@ -29,7 +29,7 @@ int main() {
             std::cout << "Transcription started in " << std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time).count() << "ms" << std::endl;
         }
 
-        std::cout << "Press enter to stop transcription";
+        std::cout << "Press enter to stop transcription\n";
         std::cin.get();
         
         {
@@ -40,7 +40,7 @@ int main() {
         }
         
         std::string input;
-        std::cout << "Enter q to exit and c to continue";
+        std::cout << "Enter q to exit and c to continue: ";
         std::getline(std::cin, input);
         if (input == "q")
             break;

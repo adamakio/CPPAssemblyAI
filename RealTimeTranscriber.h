@@ -87,7 +87,7 @@ namespace ChatBot {
         std::atomic<bool> m_isConnected{ false }; ///< Indicates if the WebSocket connection is open
 
         std::thread m_sendThread; ///< Thread for sending audio data
-        std::list<std::string> m_audioQueue; ///< Queue for audio data
+        std::deque<std::string> m_audioQueue; ///< Queue for audio data
         std::condition_variable m_queueCond; ///< Condition variable for queue
         std::atomic<bool> m_stopFlag{ false }; ///< Indicates if the transcription has been stopped
 
@@ -105,9 +105,12 @@ namespace ChatBot {
         const PaSampleFormat m_format{ paInt16 }; ///< WAV PCM16
         const int m_channels{ 1 }; ///< Mono (single-channel)
 
-        // Message handlers
         // Define a map to hold handlers for different types of messages.
         std::unordered_map<std::string, std::function<void(nlohmann::json&)>> m_messageHandlers;
+
+        // Performance trackers
+        std::chrono::high_resolution_clock::time_point m_inputTimestamp{std::chrono::high_resolution_clock::now()};
+        std::chrono::high_resolution_clock::time_point m_transcriptionTimestamp;
         
     };
 } // namespace ChatBot

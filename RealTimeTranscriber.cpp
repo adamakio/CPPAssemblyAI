@@ -16,7 +16,7 @@ using namespace ChatBot;
 
 RealTimeTranscriber::RealTimeTranscriber(int sample_rate)
     : m_sampleRate(sample_rate)
-    , m_framesPerBuffer(static_cast<int>(sample_rate * 0.1))
+    , m_framesPerBuffer(static_cast<int>(sample_rate * 0.2))
 {
     // Set up WebSocket++ loggers
     m_wsClient.clear_access_channels(websocketpp::log::alevel::all);
@@ -199,6 +199,7 @@ int RealTimeTranscriber::on_audio_data(const void* inputBuffer, unsigned long fr
     if (!m_isConnected.load()) {
         return paComplete; // Use paComplete to indicate the stream can be stopped.
     }
+    m_inputTimestamp = std::chrono::high_resolution_clock::now();
 
     // Before sending, check if the WebSocket connection is open and valid.
     if (m_wsClient.get_con_from_hdl(m_wsHandle)->get_state() != websocketpp::session::state::open) {
@@ -263,6 +264,11 @@ void RealTimeTranscriber::on_message(connection_hdl hdl, message_ptr msg) {
     auto it = m_messageHandlers.find(message_type);
     if (it != m_messageHandlers.end()) {
         it->second(json_msg);
+        m_transcriptionTimestamp = std::chrono::high_resolution_clock::now();
+        std::cout << "Time taken for transcription: "
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(m_transcriptionTimestamp - m_inputTimestamp).count()
+                  << " ms"
+                  << std::endl;
     }
     else {
         std::cout << "Received unknown message type: " << message_type << std::endl;
