@@ -185,18 +185,15 @@ int RealTimeTranscriber::on_audio_data(const void* inputBuffer, unsigned long fr
     // Cast data passed through stream to our structure.
     const auto* in = static_cast<const int16_t*>(inputBuffer);
     m_audioDataBuffer.assign(reinterpret_cast<const char*>(in), framesPerBuffer * m_channels * sizeof(int16_t)); // Copy the audio data into the buffer
-    m_audioJSONBuffer["audio_data"] = websocketpp::base64_encode(reinterpret_cast<const unsigned char*>(m_audioDataBuffer.data()), m_audioDataBuffer.size());
-    enqueue_audio_data(m_audioJSONBuffer.dump());
+    enqueue_audio_data(m_audioDataBuffer);
 
     return paContinue;
 }
 
 // New methods for queue handling
 void RealTimeTranscriber::enqueue_audio_data(const std::string& audio_data) {
-    {
-        std::lock_guard<std::mutex> lock(m_audioQueueMutex);
-        m_audioQueue.push(audio_data);
-    }
+    std::lock_guard<std::mutex> lock(m_audioQueueMutex);
+    m_audioQueue.push(audio_data);
     m_queueCond.notify_all();
 }
 
@@ -216,7 +213,8 @@ void RealTimeTranscriber::send_audio_data_thread() {
             m_audioQueue.pop();
         }
         // Send the audio data using WebSocket
-        m_wsClient.send(m_wsHandle, audio_data, websocketpp::frame::opcode::text, ec);
+        m_audioJSONBuffer["audio_data"] = websocketpp::base64_encode(reinterpret_cast<const unsigned char*>(audio_data.data()), audio_data.size());
+        m_wsClient.send(m_wsHandle, m_audioJSONBuffer.dump(), websocketpp::frame::opcode::text, ec);
         if (ec) {
             std::cout << "Audio Data Send failed: " << ec.message() << std::endl;
         }
